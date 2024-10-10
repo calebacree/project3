@@ -1,202 +1,125 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <signal.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/msg.h>
 #include <time.h>
-#include <string.h>
-#include <sys/types.h>
 
-#define MAX_CHILDREN 20
-#define CLOCK_INCREMENT 250000000  // 250 milliseconds in nanoseconds
+#define MAX_PROCESSES 20
 
-// Structure for the process control block
+// Structure to represent a Process Control Block (PCB)
 struct PCB {
-    int occupied;      // 0 means free, 1 means occupied
-    pid_t pid;         // Process ID of the worker
-    int startSeconds;  // Time worker was launched (seconds)
-    int startNano;     // Time worker was launched (nanoseconds)
+    int occupied; // 1 if slot is occupied, 0 if free
+    pid_t pid;    // Process ID of the child
+    int startSeconds; // Time when it was forked (simulated clock seconds)
+    int startNano;    // Time when it was forked (simulated clock nanoseconds)
 };
 
-// Message structure for message queue
-struct msgbuf {
-    long mtype;   // Message type
-    int mtext;    // Message content (1 for running, 0 for termination)
+// Simulated system clock
+struct SysClock {
+    int seconds;
+    int nanoseconds;
 };
 
-// Global variables for shared memory and message queue IDs
-int shmid, msqid;
-int *simClock;  // Shared memory clock (two integers, seconds and nanoseconds)
-int maxWorkers = 5;  // Default number of workers
-int workersLaunched = 0;
-int maxTimeLimit = 5; // Default max time for workers
+// Shared memory for the system clock
+struct SysClock *sysClock = NULL;
+int shmid; // Shared memory ID
 
-struct PCB processTable[MAX_CHILDREN];  // Process table
+// Array of Process Control Blocks
+struct PCB processTable[MAX_PROCESSES] = {0};
 
-// Function prototypes
-void incrementClock(int);
-void handleSIGALRM(int);
-void handleSIGINT(int);
-void cleanup();
+// Function to print the process table
+void printProcessTable() {
+    printf("OSS PID: %d SysClockS: %d SysClockNano: %d\n", getpid(), sysClock->seconds, sysClock->nanoseconds);
+    printf("Process Table:\n");
+    printf("Entry\tOccupied\tPID\tStartS\tStartN\n");
+    
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        printf("%d\t%d\t\t%d\t%d\t%d\n", i, processTable[i].occupied, processTable[i].pid, 
+               processTable[i].startSeconds, processTable[i].startNano);
+    }
+    printf("\n");
+}
 
 int main(int argc, char *argv[]) {
-    int opt;
-    char logFilename[256] = "oss.log";
-    int clockIncrement = 100; // Default interval for launching workers in ms
-
-    // Parse command line arguments
-    while ((opt = getopt(argc, argv, "n:s:t:i:f:h")) != -1) {
-        switch (opt) {
-            case 'n': maxWorkers = atoi(optarg); break;
-            case 's': maxWorkers = atoi(optarg); break;
-            case 't': maxTimeLimit = atoi(optarg); break;
-            case 'i': clockIncrement = atoi(optarg); break;
-            case 'f': strncpy(logFilename, optarg, 255); break;
-            case 'h':
-                printf("Usage: oss [-n proc] [-s simul] [-t timeLimit] [-i interval] [-f logFile]\n");
-                exit(EXIT_SUCCESS);
-        }
-    }
-
-    // Setup shared memory for the clock (two integers: seconds and nanoseconds)
-    key_t shmKey = ftok("oss.c", 'A');
-    shmid = shmget(shmKey, sizeof(int) * 2, IPC_CREAT | 0666);
+    int maxChildren = 5; // Number of child processes to launch for demonstration
+    int processCounter = 0; // Number of launched processes
+    
+    // Create shared memory for system clock
+    shmid = shmget(IPC_PRIVATE, sizeof(struct SysClock), IPC_CREAT | 0666);
     if (shmid == -1) {
-        perror("shmget");
-        exit(EXIT_FAILURE);
-    }
-    simClock = (int *)shmat(shmid, NULL, 0);
-    simClock[0] = 0;  // simClock[0] is the seconds
-    simClock[1] = 0;  // simClock[1] is the nanoseconds
-
-    // Setup message queue
-    key_t msgKey = ftok("oss.c", 'B');
-    msqid = msgget(msgKey, IPC_CREAT | 0666);
-    if (msqid == -1) {
-        perror("msgget");
-        exit(EXIT_FAILURE);
+        perror("shmget failed");
+        exit(1);
     }
 
-    // Signal handling for timeout and Ctrl+C
-    signal(SIGALRM, handleSIGALRM);
-    signal(SIGINT, handleSIGINT);
-    alarm(60);  // Set 60-second timer for the program
-
-    // Open log file
-    FILE *logFile = fopen(logFilename, "w");
-    if (!logFile) {
-        perror("fopen");
-        exit(EXIT_FAILURE);
+    sysClock = (struct SysClock*) shmat(shmid, NULL, 0);
+    if (sysClock == (void*) -1) {
+        perror("shmat failed");
+        exit(1);
     }
 
-    // Process table initialization
-    for (int i = 0; i < MAX_CHILDREN; i++) {
-        processTable[i].occupied = 0;
-    }
+    // Initialize the system clock
+    sysClock->seconds = 0;
+    sysClock->nanoseconds = 0;
 
-    // Main loop
-    while (1) {
-        // Launch a new worker if we are below the limit
-        if (workersLaunched < maxWorkers) {
-            int emptyIndex = -1;
-            for (int i = 0; i < MAX_CHILDREN; i++) {
+    // Loop to simulate the system clock and child process creation
+    while (processCounter < maxChildren) {
+        // Fork a new child process
+        pid_t pid = fork();
+        
+        if (pid < 0) {
+            perror("fork failed");
+            exit(1);
+        }
+        
+        if (pid == 0) { // Child process (worker)
+            // Simulate the worker execution (replace with exec or appropriate child code)
+            execl("./worker", "worker", NULL);
+            exit(0);
+        } else { // Parent process (oss)
+            // Find a free slot in the process table
+            for (int i = 0; i < MAX_PROCESSES; i++) {
                 if (processTable[i].occupied == 0) {
-                    emptyIndex = i;
+                    processTable[i].occupied = 1;
+                    processTable[i].pid = pid;
+                    processTable[i].startSeconds = sysClock->seconds;
+                    processTable[i].startNano = sysClock->nanoseconds;
                     break;
                 }
             }
-            if (emptyIndex != -1) {
-                // Fork and launch a new worker process
-                pid_t pid = fork();
-                if (pid == -1) {
-                    perror("fork");
-                    break;
-                } else if (pid == 0) {
-                    // Child process (worker)
-                    char workerTime[16];
-                    snprintf(workerTime, sizeof(workerTime), "%d", rand() % maxTimeLimit + 1);
-                    execl("./worker", "worker", workerTime, NULL);  // Launch worker
-                    perror("execl");
-                    exit(EXIT_FAILURE);
-                } else {
-                    // Parent (oss)
-                    workersLaunched++;
-                    processTable[emptyIndex].occupied = 1;
-                    processTable[emptyIndex].pid = pid;
-                    processTable[emptyIndex].startSeconds = simClock[0];
-                    processTable[emptyIndex].startNano = simClock[1];
-                    fprintf(logFile, "OSS: Launched worker %d at %d:%d\n", pid, simClock[0], simClock[1]);
-                    printf("OSS: Launched worker %d at %d:%d\n", pid, simClock[0], simClock[1]);
-                }
-            }
+
+            // Print the process table after launching a new child process
+            printProcessTable();
+
+            processCounter++;
         }
 
-        // Increment clock
-        incrementClock(workersLaunched);
-
-        // Message passing: send message to a worker
-        struct msgbuf message;
-        for (int i = 0; i < MAX_CHILDREN; i++) {
-            if (processTable[i].occupied) {
-                message.mtype = processTable[i].pid;
-                message.mtext = 1;  // Message content (running)
-                if (msgsnd(msqid, &message, sizeof(int), 0) == -1) {
-                    perror("msgsnd");
-                    break;
-                }
-                fprintf(logFile, "OSS: Sent message to worker %d\n", processTable[i].pid);
-            }
+        // Simulate system clock increment
+        sysClock->nanoseconds += 100000000; // Increment by 100ms (100 million nanoseconds)
+        if (sysClock->nanoseconds >= 1000000000) {
+            sysClock->seconds++;
+            sysClock->nanoseconds -= 1000000000;
         }
 
-        // Receiving messages from workers
-        for (int i = 0; i < MAX_CHILDREN; i++) {
-            if (processTable[i].occupied) {
-                if (msgrcv(msqid, &message, sizeof(int), processTable[i].pid, IPC_NOWAIT) != -1) {
-                    if (message.mtext == 0) {  // Worker indicates it's done
-                        fprintf(logFile, "OSS: Worker %d is terminating\n", processTable[i].pid);
-                        waitpid(processTable[i].pid, NULL, 0);
-                        processTable[i].occupied = 0;  // Mark PCB as free
-                        workersLaunched--;
-                    }
-                }
-            }
+        // Print the process table every 0.5 simulated seconds
+        if (sysClock->nanoseconds % 500000000 == 0) {
+            printProcessTable();
         }
+
+        // Simulate delay for launching the next child
+        usleep(100000); // 100ms delay in real time
     }
 
-    fclose(logFile);
-    cleanup();  // Cleanup shared memory and message queue before exit
-    return 0;
-}
+    // Cleanup: Wait for all children to terminate and print the final process table
+    while (wait(NULL) > 0);
+    printProcessTable();
 
-// Increment the simulated clock based on number of active workers
-void incrementClock(int numWorkers) {
-    int increment = CLOCK_INCREMENT / (numWorkers ? numWorkers : 1);
-    simClock[1] += increment;
-    if (simClock[1] >= 1000000000) {
-        simClock[1] -= 1000000000;
-        simClock[0]++;
-    }
-}
-
-// SIGALRM handler for 60-second timeout
-void handleSIGALRM(int sig) {
-    printf("OSS: Timeout reached. Terminating all workers.\n");
-    cleanup();
-    exit(0);
-}
-
-// SIGINT handler for Ctrl+C termination
-void handleSIGINT(int sig) {
-    printf("OSS: Caught Ctrl+C. Terminating all workers.\n");
-    cleanup();
-    exit(0);
-}
-
-// Cleanup shared memory and message queue
-void cleanup() {
+    // Detach and remove shared memory
+    shmdt(sysClock);
     shmctl(shmid, IPC_RMID, NULL);
-    msgctl(msqid, IPC_RMID, NULL);
+
+    return 0;
 }
